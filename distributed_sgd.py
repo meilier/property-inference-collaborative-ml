@@ -277,10 +277,10 @@ def set_local_partial(old, new, local_params_list, id, partial):
                 n_left = m_left % 9
                 p = math.floor(n_left / 3)
                 q = n_left % 3
-                old[0][m][n][p][q] = new[m][n][p][q]
+                old[0][m][n][p][q] = new[0][m][n][p][q]
             elif max_index[i] >= 864 and max_index[i] <= 895:
                 pos = max_index[i] - 864
-                old[1][pos] = new['fc.0.bias'][pos]
+                old[1][pos] = new[1][pos]
             elif max_index[i] >= 896 and max_index[i] <= 19327:
                 m = math.floor(max_index[i] / 288)
                 m_left = max_index[i] % 288
