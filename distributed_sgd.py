@@ -1,4 +1,5 @@
 import os
+import math
 os.environ.setdefault('PATH', '')
 import sys
 import time
@@ -14,6 +15,9 @@ from load_lfw import load_lfw_with_attrs, BINARY_ATTRS, MULTI_ATTRS
 
 SAVE_DIR = './grads/'
 
+# 参数的计算可通过global_params来计算
+net_victim = 0
+net_attacker = 0
 
 if not os.path.exists(SAVE_DIR):
     os.mkdir(SAVE_DIR)
@@ -180,7 +184,7 @@ def build_worker_attacker(input_shape, classes=2, infer_classes=2, lr=None, seed
     # val_fn 为攻击者私有的验证属性分类的正确性模型
     val_fn = theano.function([input_var, target_var_B], [loss_B, test_acc])
 
-    return params, grad_fn, params_B, grads_B_fn, val_fn
+    return network,params, grad_fn, params_B, grads_B_fn, val_fn
 
 
 def build_worker(input_shape, classes=2, lr=None, seed=54321):
@@ -216,7 +220,7 @@ def build_worker(input_shape, classes=2, lr=None, seed=54321):
     #grads_dict: {'W0': (dmean/dW), 'W2': (dmean/dW), 'W4': (dmean/dW), 'W6': (dmean/dW), 'W8': (dmean/dW), 'b1': (dmean/db), 'b3': (dmean/db), 'b5': (dmean/db), 'b7': (dmean/db), 'b9': (dmean/db)}
     grad_fn = theano.function([input_var, target_var], grads_dict)
     # params [W, b, W, b, W, b, W, b, W, b]
-    return params, grad_fn
+    return network, params, grad_fn
 
 
 def inf_data(x, y, batchsize, shuffle=False, y_b=None):
@@ -247,8 +251,85 @@ def set_local(global_params, local_params_list):
         for p, gp in zip(params, global_params):
             p.set_value(gp.get_value())
 
+# add by wzx, partial download gradients from parameter server 
+def set_local_partial(old, new, local_params_list, id, partial):
+    # find 10% maxchanged and change old_global_params, use it to chan
+    # change old to old + Dmax10(old,new)
+    first = True
+    for i,v in enumerate(old):
+        if first == True:
+            no = np.array(old[i]).flatten()
+            nn = np.array(new[i]).flatten()
+            first = False
+        else:
+            no = np.concatenate((no,np.array(old[i]).flatten()))
+            nn = np.concatenate((nn,np.array(new[i]).flatten()))
+    diff = abs(nn - no)
+    max_index = np.argsort(-diff)
+    needed = len(diff) * partial
+    for i in range(len(diff)):
+        if i < needed:
+            # four dimesinal m,n,p,q
+            if max_index[i] <= 863:
+                m = math.floor(max_index[i] / 27)
+                m_left = max_index[i] % 27
+                n = math.floor(m_left / 9)
+                n_left = m_left % 9
+                p = math.floor(n_left / 3)
+                q = n_left % 3
+                old[0][m][n][p][q] = new[m][n][p][q]
+            elif max_index[i] >= 864 and max_index[i] <= 895:
+                pos = max_index[i] - 864
+                old[1][pos] = new['fc.0.bias'][pos]
+            elif max_index[i] >= 896 and max_index[i] <= 19327:
+                m = math.floor(max_index[i] / 288)
+                m_left = max_index[i] % 288
+                n = math.floor(m_left / 9)
+                n_left = m_left % 9
+                p = math.floor(n_left / 3)
+                q = n_left % 3
+                old[2][m][n][p][q] = new[2][m][n][p][q]
+            elif max_index[i] >= 19328 and max_index[i] <= 19391:
+                pos = max_index[i] - 19328
+                old[3][pos] = new[3][pos]
+            elif max_index[i] >= 19392 and max_index[i] <= 93119:
+                m = math.floor(max_index[i] / 576)
+                m_left = max_index[i] % 576
+                n = math.floor(m_left / 9)
+                n_left = m_left % 9
+                p = math.floor(n_left / 3)
+                q = n_left % 3
+                old[4][m][n][p][q] = new[4][m][n][p][q]
+            elif max_index[i] >= 93120 and max_index[i] <= 93247:
+                pos = max_index[i] - 93120
+                old[5][pos] = new[5][pos]
+            elif max_index[i] >= 93248 and max_index[i] <= 879679:
+                m = math.floor(max_index[i] / 256)
+                n = max_index[i] % 256
+                old[6][m][n] = new[6][m][n]
+            elif max_index[i] >= 879680 and max_index[i] <= 879935:
+                pos = max_index[i] - 879680
+                old[7][pos] = new[7][pos]
+            elif max_index[i] >= 879936 and max_index[i] <= 880447:
+                m = math.floor(max_index[i] / 2526)
+                n = max_index[i] % 2
+                old[8][m][n] = new[8][m][n]
+            elif max_index[i] >= 880448 and max_index[i] <= 880449:
+                pos = max_index[i] - 880448
+                old[9][pos] = new[9][pos]
+        else:
+            break
+
+    for i, params in enumerate(local_params_list):
+        if i == id:
+            for p, g in zip(params, old):
+                p_val = p.get_value()
+                g = np.asarray(g)
+                p.set_value(p_val)
+
 
 def update_global(global_params, grads, lr):
+    # upload all
     for p, g in zip(global_params, grads):
         p_val = p.get_value()
         g = np.asarray(g)
@@ -377,10 +458,13 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
     prediction = lasagne.nonlinearities.softmax(prediction)
     loss = lasagne.objectives.categorical_crossentropy(prediction, target_var)
     loss = loss.mean()
-
+    # global_params 长度为10的列表, 包含所有参数
     global_params = lasagne.layers.get_all_params(network, trainable=True)
+    global_params_values = lasagne.layers.get_all_param_values(network, trainable=True)
     global_grads = T.grad(loss, global_params)
 
+    # save old global_param for use
+    old_global_params = lasagne.layers.get_all_params(network, trainable=True)
     p_idx = 0
     grads_dict = dict()
     params_names = []
@@ -408,13 +492,13 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
         print("epoch : " + str(i))
         if i == attacker_id:
             split_y = splitted_y[i]
-            p, f, b_params, b_grad_fn, pval_fn = build_worker_attacker(input_shape, classes=classes, alph_B=alpha_B,
+            net_attacker, p, f, b_params, b_grad_fn, pval_fn = build_worker_attacker(input_shape, classes=classes, alph_B=alpha_B,
                                                                        infer_classes=len(np.unique(split_y[:, 1])))
             data_gen = inf_data(splitted_X[i], split_y[:, 0], y_b=split_y[:, 1], batchsize=32, shuffle=True)
             print ('Participant {} with {} data'.format(i, len(splitted_X[i])))
             data_gens.append(data_gen)
         elif i == victim_id:
-            p, f = build_worker(input_shape, classes=classes)
+            net_victim, p, f = build_worker(input_shape, classes=classes)
             # vic_Xshape:(560, 3, 62, 47)
             vic_X = np.vstack([splitted_X[i][0], splitted_X[i][1]])
             vic_y = np.concatenate([splitted_y[i][0][:, 0], splitted_y[i][1][:, 0]])
@@ -436,7 +520,7 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
         worker_grad_fns.append(f)
     # worker_params：[[W, b, W, b, W, b, W, b, W, ...], [W, b, W, b, W, b, W, b, W, ...]]结构相同，主任务可以正常训练
     #global_params ：[W, b, W, b, W, b, W, b, W, b]
-    set_local(global_params, worker_params)
+    set_local(global_params, worker_params) # 一开始将所有参与者的参数都设置和参数服务器相同
 
     train_pg, train_npg = [], []
     test_pg, test_npg = [], []
@@ -484,11 +568,14 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
     start_time = time.time()
     for it in range(num_iteration):
         aggr_grad = []
-        set_local(global_params, worker_params) ### ！！！！download 梯度操作
-
+        # set_local(global_params, worker_params)
         for i in range(n_workers):
             grad_fn = worker_grad_fns[i]
             data_gen = data_gens[i]
+            if it == 0 and i == 0:
+                print("first round no change")
+            else:
+                set_local_partial(new_pre_pre, new_pre,worker_params,i, 0.1) ### ！！！！download 梯度操作, 修改每个参与者训练本次任务都先进行梯度更新，更不是一轮直接更新
             if i == attacker_id:
                 batch = next(adv_gen)
                 inputs, targets = batch
@@ -509,8 +596,15 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
                 # 梯度列表，列表中每一项都是当前轮一批次的某个参与者的梯度变化
                 aggr_grad.append(grads_dict)
 
-            grads = [grads_dict[name] for name in params_names]
-            update_global(global_params, grads, lr) ### ！！！！upload 梯度操作
+            #grads = [grads_dict[name] for name in params_names]
+            #update_global(global_params, grads, lr) ### ！！！！upload 梯度操作，每一轮单个参与者进行训练后，进行部分梯度上传
+            new_pre_pre = global_params_values
+            if i == victim_id:
+                global_params_values = lasagne.layers.get_all_param_values(net_victim, trainable=True)
+            else:
+                global_params_values = lasagne.layers.get_all_param_values(net_attacker, trainable=True)
+            new_pre = global_params_values
+        
 
         if it >= warm_up_iters:
             # param_names ：['W0', 'b1', 'W2', 'b3', 'W4', 'b5', 'W6', 'b7', 'W8', 'b9']
