@@ -596,7 +596,10 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
                 print("first round no change")
             else:
                 set_local_partial(new_pre_pre, new_pre,worker_params,i, 0.1) ### ！！！！download 梯度操作, 修改每个参与者训练本次任务都先进行梯度更新，更不是一轮直接更新
-
+            for i_i in range(2):
+                print("------------------------------")
+                for t_i in range(10):
+                    print(worker_params[i_i][1].get_value()[t_i])
             if i == attacker_id:
                 batch = next(adv_gen)
                 inputs, targets = batch
@@ -677,18 +680,18 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
                 val_acc += acc
                 val_batches += 1
 
-            for batch in iterate_minibatches(X_test, p_test, 500, shuffle=False):
-                inputs, targets = batch
-                err, acc = pval_fn(inputs, targets)
-                val_perr += err
-                val_pacc += acc
-                val_pbatches += 1
+            #for batch in iterate_minibatches(X_test, p_test, 500, shuffle=False):
+            #    inputs, targets = batch
+            #    err, acc = pval_fn(inputs, targets)
+            #    val_perr += err
+            #    val_pacc += acc
+            #    val_pbatches += 1
 
             sys.stderr.write("Iteration {} of {} took {:.3f}s\n".format(it + 1, num_iteration,
                                                                         time.time() - start_time))
             sys.stderr.write("  test accuracy:\t\t{:.2f} %\n".format(val_acc / val_batches / 500 * 100))
-            sys.stderr.write("  p-test accuracy:\t\t{:.2f} %\n".format(val_pacc / val_pbatches / 500 * 100))
-            start_time = time.time()
+            #sys.stderr.write("  p-test accuracy:\t\t{:.2f} %\n".format(val_pacc / val_pbatches / 500 * 100))
+            #start_time = time.time()
 
     np.savez(SAVE_DIR + "{}.npz".format(filename),
              train_pg=train_pg, train_npg=train_npg, test_pg=test_pg, test_npg=test_npg)
