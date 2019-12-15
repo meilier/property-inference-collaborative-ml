@@ -153,10 +153,11 @@ def build_worker_attacker(input_shape, classes=2, infer_classes=2, lr=None, seed
     # save init
     params = lasagne.layers.get_all_params([network, network_B], trainable=True)
 
+    # 如果设置lr那么就是本地训练后再参数上传
     if lr is not None:
         updates = lasagne.updates.sgd(loss, params, lr)
         train_fn = theano.function([input_var, target_var, target_var_B], loss, updates=updates)
-        return params, train_fn
+        return network, params, train_fn
     #params: [W, b, W, b, W, b, W, b, W, b, W, b]
     grads = T.grad(loss, params)
     # 取出最后两层 [W, b]
@@ -184,7 +185,7 @@ def build_worker_attacker(input_shape, classes=2, infer_classes=2, lr=None, seed
     # val_fn 为攻击者私有的验证属性分类的正确性模型
     val_fn = theano.function([input_var, target_var_B], [loss_B, test_acc])
 
-    return network,params, grad_fn, params_B, grads_B_fn, val_fn
+    return network, params, grad_fn, params_B, grads_B_fn, val_fn
 
 
 def build_worker(input_shape, classes=2, lr=None, seed=54321):
@@ -207,7 +208,7 @@ def build_worker(input_shape, classes=2, lr=None, seed=54321):
     if lr is not None:
         updates = lasagne.updates.sgd(loss, params, lr)
         train_fn = theano.function([input_var, target_var], loss, updates=updates)
-        return params, train_fn
+        return network, params, train_fn
 
     grads = T.grad(loss, params)
 
@@ -282,8 +283,9 @@ def set_local_partial(old, new, local_params_list, id, partial):
                 pos = max_index[i] - 864
                 old[1][pos] = new[1][pos]
             elif max_index[i] >= 896 and max_index[i] <= 19327:
-                m = math.floor(max_index[i] / 288)
-                m_left = max_index[i] % 288
+                tmp = max_index[i] - 896
+                m = math.floor(tmp / 288) 
+                m_left = tmp % 288
                 n = math.floor(m_left / 9)
                 n_left = m_left % 9
                 p = math.floor(n_left / 3)
@@ -293,8 +295,9 @@ def set_local_partial(old, new, local_params_list, id, partial):
                 pos = max_index[i] - 19328
                 old[3][pos] = new[3][pos]
             elif max_index[i] >= 19392 and max_index[i] <= 93119:
-                m = math.floor(max_index[i] / 576)
-                m_left = max_index[i] % 576
+                tmp = max_index[i] - 19392
+                m = math.floor(tmp / 576) 
+                m_left = tmp % 576
                 n = math.floor(m_left / 9)
                 n_left = m_left % 9
                 p = math.floor(n_left / 3)
@@ -304,15 +307,17 @@ def set_local_partial(old, new, local_params_list, id, partial):
                 pos = max_index[i] - 93120
                 old[5][pos] = new[5][pos]
             elif max_index[i] >= 93248 and max_index[i] <= 879679:
-                m = math.floor(max_index[i] / 256)
-                n = max_index[i] % 256
+                tmp = max_index[i] - 93248
+                m = math.floor(tmp / 256)
+                n = tmp % 256
                 old[6][m][n] = new[6][m][n]
             elif max_index[i] >= 879680 and max_index[i] <= 879935:
                 pos = max_index[i] - 879680
                 old[7][pos] = new[7][pos]
             elif max_index[i] >= 879936 and max_index[i] <= 880447:
-                m = math.floor(max_index[i] / 2526)
-                n = max_index[i] % 2
+                tmp = max_index[i] - 879936
+                m = math.floor(tmp / 2)
+                n = tmp % 2
                 old[8][m][n] = new[8][m][n]
             elif max_index[i] >= 880448 and max_index[i] <= 880449:
                 pos = max_index[i] - 880448
@@ -325,11 +330,23 @@ def set_local_partial(old, new, local_params_list, id, partial):
             for p, g in zip(params, old):
                 p_val = p.get_value()
                 g = np.asarray(g)
-                p.set_value(p_val)
+                p.set_value(g)
 
 
 def update_global(global_params, grads, lr):
     # upload all
+    for p, g in zip(global_params, grads):
+        p_val = p.get_value()
+        g = np.asarray(g)
+        p.set_value(p_val - g * np.float32(lr))
+
+def update_global_wzx(old_global_params, global_params, grads, lr):
+    # set old to new, change new to newer
+    for p, g in zip(old_global_params, global_params):
+            p_val = p.get_value()
+            g_val = g.get_value()
+            g_val = np.asarray(g_val)
+            p.set_value(g_val)
     for p, g in zip(global_params, grads):
         p_val = p.get_value()
         g = np.asarray(g)
@@ -473,6 +490,7 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
         params_names.append(key)
         p_idx += 1
         grads_dict[key] = g
+    ps_dict = grads_dict
     # grads_dict:{'W0': (dmean/dW), 'W2': (dmean/dW), 'W4': (dmean/dW), 'W6': (dmean/dW), 'W8': (dmean/dW), 'b1': (dmean/db), 'b3': (dmean/db), 'b5': (dmean/db), 'b7': (dmean/db), 'b9': (dmean/db)}
     global_grad_fn = theano.function([input_var, target_var], grads_dict)
     test_prediction = lasagne.layers.get_output(network, deterministic=True)
@@ -492,13 +510,15 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
         print("epoch : " + str(i))
         if i == attacker_id:
             split_y = splitted_y[i]
-            net_attacker, p, f, b_params, b_grad_fn, pval_fn = build_worker_attacker(input_shape, classes=classes, alph_B=alpha_B,
-                                                                       infer_classes=len(np.unique(split_y[:, 1])))
+            # net_attacker, p, f, b_params, b_grad_fn, pval_fn = build_worker_attacker(input_shape, classes=classes, alph_B=alpha_B,
+            #                                                            infer_classes=len(np.unique(split_y[:, 1])), lr = 0.1)
+            net_attacker, p, f = build_worker_attacker(input_shape, classes=classes, alph_B=alpha_B,
+                                                            infer_classes=len(np.unique(split_y[:, 1])), lr = 0.1)
             data_gen = inf_data(splitted_X[i], split_y[:, 0], y_b=split_y[:, 1], batchsize=32, shuffle=True)
             print ('Participant {} with {} data'.format(i, len(splitted_X[i])))
             data_gens.append(data_gen)
         elif i == victim_id:
-            net_victim, p, f = build_worker(input_shape, classes=classes)
+            net_victim, p, f = build_worker(input_shape, classes=classes, lr = 0.1)
             # vic_Xshape:(560, 3, 62, 47)
             vic_X = np.vstack([splitted_X[i][0], splitted_X[i][1]])
             vic_y = np.concatenate([splitted_y[i][0][:, 0], splitted_y[i][1][:, 0]])
@@ -576,6 +596,7 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
                 print("first round no change")
             else:
                 set_local_partial(new_pre_pre, new_pre,worker_params,i, 0.1) ### ！！！！download 梯度操作, 修改每个参与者训练本次任务都先进行梯度更新，更不是一轮直接更新
+
             if i == attacker_id:
                 batch = next(adv_gen)
                 inputs, targets = batch
@@ -597,7 +618,11 @@ def train_multi_task_ps(data, num_iteration=6000, train_size=0.3, victim_id=0, s
                 aggr_grad.append(grads_dict)
 
             #grads = [grads_dict[name] for name in params_names]
+            #print("test here")
+            # ttt = np.asarray(grads[1])
             #update_global(global_params, grads, lr) ### ！！！！upload 梯度操作，每一轮单个参与者进行训练后，进行部分梯度上传
+            #print("test here2")
+            # 获取网络参数失效lasagne.layers.get_all_param_values只能获取默认参数，所有的参数变化都在grads_dict里面
             new_pre_pre = global_params_values
             if i == victim_id:
                 global_params_values = lasagne.layers.get_all_param_values(net_victim, trainable=True)
